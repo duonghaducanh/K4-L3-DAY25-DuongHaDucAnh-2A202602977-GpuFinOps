@@ -61,3 +61,62 @@ def flag_util_lies(rows, util_threshold: float = 0.90, mfu_threshold: float = 0.
 def idle_waste_usd(idle_hours: float, on_demand_hr: float) -> float:
     """Dollars burned by a GPU left running idle (training done, instance up)."""
     return max(0.0, idle_hours) * max(0.0, on_demand_hr)
+
+
+# ---------------------------------------------------------------------------
+# Extension 2 — right-sizing by MBU / bandwidth, not by $/GPU-hr
+# ---------------------------------------------------------------------------
+def dollars_per_gb_vram(on_demand_hr: float, hbm_gb: float) -> float:
+    """Rental $ per GB of HBM — capacity efficiency of a GPU type."""
+    if hbm_gb <= 0:
+        return float("inf")
+    return max(0.0, on_demand_hr) / hbm_gb
+
+
+def dollars_per_tbps(on_demand_hr: float, peak_bw_tbs: float) -> float:
+    """Rental $ per TB/s of HBM bandwidth — the metric that matters for decode.
+
+    Memory-bound inference is limited by how fast weights/KV move, so the GPU
+    that costs least *per unit of bandwidth* is the efficient one, even if its
+    sticker $/GPU-hr is higher. This is why "pick the cheapest GPU" is wrong.
+    """
+    if peak_bw_tbs <= 0:
+        return float("inf")
+    return max(0.0, on_demand_hr) / peak_bw_tbs
+
+
+def rightsize_candidate(
+    needed_bw_tbs: float,
+    needed_vram_gb: float,
+    catalog: dict,
+    current_type: str | None = None,
+    safety: float = 1.05,
+) -> dict | None:
+    """Cheapest GPU type that still satisfies a memory-bound workload's needs.
+
+    `catalog` maps gpu_type -> dict with 'on_demand_hr', 'peak_bw_tbs', 'hbm_gb'.
+    A candidate must deliver at least `safety` x the observed achieved bandwidth
+    AND `safety` x the observed VRAM footprint — right-sizing may not degrade the
+    workload. Returns None when no cheaper adequate GPU exists (already optimal),
+    so the caller never downsizes into a slower device.
+    """
+    cur_hr = float(catalog.get(current_type, {}).get("on_demand_hr", float("inf"))) if current_type else float("inf")
+    best = None
+    for gtype, c in catalog.items():
+        if gtype == current_type:
+            continue
+        if float(c["peak_bw_tbs"]) < needed_bw_tbs * safety:
+            continue
+        if float(c["hbm_gb"]) < needed_vram_gb * safety:
+            continue
+        hr = float(c["on_demand_hr"])
+        if hr < cur_hr and (best is None or hr < best["on_demand_hr"]):
+            best = {
+                "gpu_type": gtype,
+                "on_demand_hr": hr,
+                "peak_bw_tbs": float(c["peak_bw_tbs"]),
+                "hbm_gb": float(c["hbm_gb"]),
+                "dollars_per_tbps": dollars_per_tbps(hr, float(c["peak_bw_tbs"])),
+                "dollars_per_gb_vram": dollars_per_gb_vram(hr, float(c["hbm_gb"])),
+            }
+    return best

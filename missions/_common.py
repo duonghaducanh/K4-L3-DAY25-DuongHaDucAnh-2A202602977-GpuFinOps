@@ -9,6 +9,15 @@ ROOT = os.path.dirname(HERE)
 DATA = os.path.join(ROOT, "data")
 sys.path.insert(0, ROOT)  # make `finops` importable when run as a script
 
+# Reports contain unicode (arrows, check marks). On Windows the default console
+# codec is cp1252, which raises UnicodeEncodeError on print(); force UTF-8 so the
+# missions can run anywhere without a PYTHONIOENCODING env var.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
 
 def load_csv(name: str) -> list[dict]:
     with open(os.path.join(DATA, name), newline="") as f:
